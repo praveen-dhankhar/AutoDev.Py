@@ -39,10 +39,11 @@ Orchestrator
          +--> fail --> traceback sent back to Coder Agent
                        |
                        v
-                  retry until MAX_RETRIES is exhausted
+                  RETRYING until success, retry budget is exhausted,
+                  or a circuit breaker stops repeated failures
 ```
 
-PR-Agent uses a strict orchestration loop rather than an open-ended autonomous agent. The Architect creates a plan, the Coder writes a runnable script, and the QA layer executes the generated file inside a constrained Docker sandbox. If execution fails, the exact traceback becomes the next Coder prompt, giving the system a bounded self-correction loop.
+PR-Agent uses a strict, explicit state machine rather than an open-ended autonomous agent. The pipeline moves through `PLANNING -> CODING -> EXECUTING -> RETRYING -> SUCCEEDED/FAILED`, and each transition is written to `execution_log.jsonl` with a timestamp and reason. If execution fails, the exact traceback becomes the next Coder prompt; if the same traceback appears twice in a row, a circuit breaker stops the loop instead of burning the remaining retry budget.
 
 ## Tech Stack
 
@@ -55,14 +56,23 @@ git clone https://github.com/praveen-dhankhar/AutoDev.Py.git
 cd AutoDev.Py
 python3.11 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 docker build -f sandbox.Dockerfile -t autodev-py-sandbox:latest .
+docker build -t autodev-py-app:latest .
 ollama pull qwen2.5-coder:7b
 cp .env.example .env
-streamlit run app.py
+pr-agent ui
 ```
 
 The app opens at [http://localhost:8501](http://localhost:8501). Docker must be running so generated scripts execute inside the sandbox, and Ollama must be running locally at `http://localhost:11434`.
+
+To run the pipeline from a shell instead of the dashboard:
+
+```bash
+pr-agent run "Write a Python script that prints the Fibonacci sequence up to 10"
+```
+
+`pr-agent run` performs an Ollama health check before starting the agent loop and exits early if the local model server is unavailable.
 
 ## Self-Correction Example
 
@@ -104,7 +114,8 @@ data = response.json()          # Fixed: using .json() method
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements-dev.txt
+pip install -e ".[dev]"
+ruff check .
 pytest
 ```
 
@@ -133,7 +144,7 @@ Each run writes local artifacts under `workspace/sessions/{session_id}/`:
 - `final.py` is written only after a successful execution
 - `execution_log.jsonl` records timestamped agent and system messages
 
-The `workspace/` directory is intentionally ignored by Git because it contains generated run output.
+The dashboard reloads past sessions from `workspace/sessions/` on startup. The `workspace/` directory is intentionally ignored by Git because it contains generated run output.
 
 ## What I Learned
 

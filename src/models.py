@@ -6,13 +6,15 @@ from datetime import datetime
 from typing import List, Literal, Optional
 
 
-ExecutionStatus = Literal["pass", "fail"]
+ExecutionStatus = Literal["pass", "fail", "cancelled"]
 SessionStatus = Literal[
     "idle",
     "planning",
     "coding",
     "executing",
+    "retrying",
     "correcting",
+    "cancelled",
     "completed",
     "failed",
 ]
@@ -52,14 +54,30 @@ class AgentLogEntry:
     message: str
     level: LogLevel = "info"
     timestamp: datetime = field(default_factory=datetime.utcnow)
+    event_type: Optional[str] = None
+    from_state: Optional[str] = None
+    to_state: Optional[str] = None
+    attempt_number: Optional[int] = None
+    reason: Optional[str] = None
 
     def to_dict(self) -> dict:
-        return {
+        payload = {
             "agent": self.agent,
             "message": self.message,
             "level": self.level,
             "timestamp": self.timestamp.isoformat(),
         }
+        for key in (
+            "event_type",
+            "from_state",
+            "to_state",
+            "attempt_number",
+            "reason",
+        ):
+            value = getattr(self, key)
+            if value is not None:
+                payload[key] = value
+        return payload
 
 
 @dataclass

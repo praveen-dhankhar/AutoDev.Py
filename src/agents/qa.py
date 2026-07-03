@@ -1,15 +1,18 @@
 import os
+import threading
+from typing import Optional
 
 from src.models import ExecutionResult
 from src.tools.python_executor import ExecutorInput, SandboxedPythonExecutor
 
 
-def run_qa(script_path: str) -> ExecutionResult:
+def run_qa(script_path: str, cancel_event: Optional[threading.Event] = None) -> ExecutionResult:
     executor = SandboxedPythonExecutor()
     output = executor.run(
         ExecutorInput(
             script_path=script_path,
             timeout_seconds=int(os.getenv("SUBPROCESS_TIMEOUT", 30)),
+            cancel_event=cancel_event,
         )
     )
     return ExecutionResult(

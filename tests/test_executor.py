@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -89,6 +90,48 @@ def test_executor_times_out_script():
         cleanup_call = run_mock.call_args_list[2]
         assert cleanup_call.args[0][:3] == ["docker", "rm", "-f"]
         assert cleanup_call.args[0][3].startswith(SANDBOX_CONTAINER_PREFIX)
+    finally:
+        os.unlink(script_path)
+
+
+def test_executor_cancel_removes_running_sandbox():
+    script_path = write_temp_script("while True: pass")
+    cancel_event = threading.Event()
+
+    class FakeProcess:
+        returncode = -9
+
+        def __init__(self):
+            self.communicate_calls = 0
+            self.killed = False
+
+        def communicate(self, input=None, timeout=None):
+            if self.communicate_calls == 0:
+                self.communicate_calls += 1
+                cancel_event.set()
+                raise subprocess.TimeoutExpired(cmd=["docker", "run"], timeout=timeout)
+            return "", ""
+
+        def kill(self):
+            self.killed = True
+
+    try:
+        with patch.object(SandboxedPythonExecutor, "_image_unavailable_reason", return_value=None):
+            with patch.object(SandboxedPythonExecutor, "build_docker_command", return_value=["docker"]):
+                with patch.object(SandboxedPythonExecutor, "_force_remove_container") as remove_mock:
+                    with patch("src.tools.python_executor.subprocess.Popen", return_value=FakeProcess()):
+                        result = PythonExecutorTool().run(
+                            ExecutorInput(
+                                script_path=script_path,
+                                timeout_seconds=5,
+                                cancel_event=cancel_event,
+                            )
+                        )
+
+        assert result.status == "cancelled"
+        assert result.exit_code == -2
+        assert "Cancelled" in result.stderr
+        remove_mock.assert_called_once()
     finally:
         os.unlink(script_path)
 

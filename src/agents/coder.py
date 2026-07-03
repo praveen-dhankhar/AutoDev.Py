@@ -49,6 +49,8 @@ Return ONLY the Python script. No markdown fences. No explanations. No preamble.
         )
         result = Crew(agents=[agent], tasks=[task_obj], verbose=False).kickoff()
         code = str(result)
-        return re.sub(r"^```(?:python)?\n?", "", code.strip()).rstrip("```").strip()
+        code = re.sub(r"^```(?:python)?\n?", "", code.strip())
+        code = re.sub(r"\n?```$", "", code)
+        return code.strip()
     except Exception as e:
         raise RuntimeError(f"Coder agent failed: {e}") from e

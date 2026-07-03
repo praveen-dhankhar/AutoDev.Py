@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -239,6 +240,42 @@ while True:
     assert result.status == "fail"
     assert result.exit_code == -1
     assert "TimeoutError" in result.stderr
+    assert not host_marker.exists()
+    host_marker.unlink(missing_ok=True)
+
+
+@pytest.mark.docker
+def test_cancelled_execution_removes_running_container(tmp_path, monkeypatch, docker_sandbox_image):
+    monkeypatch.setenv("SANDBOX_IMAGE", docker_sandbox_image)
+    host_marker = Path.cwd() / ".sandbox-cancel-escape"
+    host_marker.unlink(missing_ok=True)
+
+    script_path = tmp_path / "payload.py"
+    script_path.write_text(
+        host_marker_probe(host_marker)
+        + """
+while True:
+    pass
+""",
+        encoding="utf-8",
+    )
+    cancel_event = threading.Event()
+    timer = threading.Timer(0.5, cancel_event.set)
+
+    try:
+        timer.start()
+        result = PythonExecutorTool().run(
+            ExecutorInput(
+                script_path=str(script_path),
+                timeout_seconds=10,
+                cancel_event=cancel_event,
+            )
+        )
+    finally:
+        timer.cancel()
+
+    assert result.status == "cancelled"
+    assert result.exit_code == -2
     assert not host_marker.exists()
     host_marker.unlink(missing_ok=True)
 

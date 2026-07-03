@@ -5,13 +5,16 @@ import time
 import streamlit as st
 from dotenv import load_dotenv
 
-from src.models import AgentLogEntry
-from src.models import AgentSession
+from src.config import OLLAMA_BASE_URL, OLLAMA_MODEL, WORKSPACE_DIR
+from src.health import check_ollama_health
+from src.models import AgentLogEntry, AgentSession
 from src.orchestrator import Orchestrator
-from src.config import OLLAMA_MODEL
+from src.session_store import load_sessions
 
 
 load_dotenv()
+
+loaded_sessions = load_sessions(WORKSPACE_DIR)
 
 st.set_page_config(
     page_title="PR-Agent",
@@ -22,17 +25,34 @@ st.set_page_config(
 
 defaults = {
     "running": False,
+    "cancelling": False,
     "current_session": None,
-    "session_history": [],
+    "session_history": loaded_sessions,
     "log_queue": queue.Queue(),
     "result_queue": queue.Queue(),
+    "cancel_event": threading.Event(),
+    "worker_thread": None,
     "config": {"model": OLLAMA_MODEL, "max_retries": 3, "timeout": 30},
     "all_log_entries": [],
     "task_input": "",
+    "ollama_health": None,
+    "last_ollama_health_check": 0.0,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+if st.session_state.current_session is None and st.session_state.session_history:
+    st.session_state.current_session = st.session_state.session_history[-1]
+    st.session_state.all_log_entries = st.session_state.current_session.logs
+
+now = time.monotonic()
+if (
+    st.session_state.ollama_health is None
+    or now - st.session_state.last_ollama_health_check > 10
+):
+    st.session_state.ollama_health = check_ollama_health(OLLAMA_BASE_URL)
+    st.session_state.last_ollama_health_check = now
 
 st.markdown(
     """
@@ -42,7 +62,9 @@ st.markdown(
 .status-planning  { background: #1E3A5F; color: #60A5FA; }
 .status-coding    { background: #14532D; color: #4ADE80; }
 .status-executing { background: #431407; color: #FB923C; }
+.status-retrying  { background: #451A03; color: #FCD34D; }
 .status-correcting{ background: #451A03; color: #FCD34D; }
+.status-cancelled { background: #312E81; color: #C4B5FD; }
 .status-completed { background: #14532D; color: #4ADE80; }
 .status-failed    { background: #450A0A; color: #F87171; }
 .stdout-block { border: 1px solid #14532D; border-radius: 8px; padding: 12px; background: #052E16; }
@@ -58,9 +80,15 @@ def run_pipeline_thread(
     log_q: queue.Queue,
     result_q: queue.Queue,
     max_retries: int,
+    cancel_event: threading.Event,
 ) -> None:
     try:
-        orch = Orchestrator(log_queue=log_q, max_retries=max_retries)
+        orch = Orchestrator(
+            log_queue=log_q,
+            max_retries=max_retries,
+            workspace_dir=WORKSPACE_DIR,
+            cancel_event=cancel_event,
+        )
         session = orch.run(task=task)
         result_q.put(session)
     except Exception as e:
@@ -79,8 +107,14 @@ while not st.session_state.result_queue.empty():
     try:
         completed_session = st.session_state.result_queue.get_nowait()
         st.session_state.current_session = completed_session
+        st.session_state.session_history = [
+            session
+            for session in st.session_state.session_history
+            if session.session_id != completed_session.session_id
+        ]
         st.session_state.session_history.append(completed_session)
         st.session_state.running = False
+        st.session_state.cancelling = False
     except queue.Empty:
         break
 
@@ -93,7 +127,9 @@ with col_status:
         if st.session_state.current_session
         else "idle"
     )
-    if st.session_state.running and st.session_state.all_log_entries:
+    if st.session_state.cancelling:
+        status = "cancelled"
+    elif st.session_state.running and st.session_state.all_log_entries:
         last_agent = st.session_state.all_log_entries[-1].agent
         if last_agent == "architect":
             status = "planning"
@@ -119,6 +155,14 @@ examples = [
 ]
 
 with left_col:
+    health = st.session_state.ollama_health
+    if health and health.healthy:
+        st.success("Ollama online")
+    else:
+        st.error("Ollama offline")
+        if health:
+            st.caption(health.message)
+
     st.subheader("What should I build?")
     user_task = st.text_area(
         "Task",
@@ -140,26 +184,44 @@ with left_col:
             st.session_state.task_input = example
             st.rerun()
 
-    run_disabled = st.session_state.running or not user_task.strip()
-    run_label = "● Running..." if st.session_state.running else "▶ Run Agent Pipeline"
-    if st.button(run_label, disabled=run_disabled, use_container_width=True):
-        st.session_state.running = True
-        st.session_state.log_queue = queue.Queue()
-        st.session_state.result_queue = queue.Queue()
-        st.session_state.all_log_entries = []
-        st.session_state.current_session = None
-        thread = threading.Thread(
-            target=run_pipeline_thread,
-            args=(
-                user_task.strip(),
-                st.session_state.log_queue,
-                st.session_state.result_queue,
-                st.session_state.config["max_retries"],
-            ),
-            daemon=True,
-        )
-        thread.start()
-        st.rerun()
+    if st.session_state.running:
+        cancel_disabled = st.session_state.cancelling
+        cancel_label = "Cancel requested" if st.session_state.cancelling else "■ Stop Run"
+        if st.button(cancel_label, disabled=cancel_disabled, use_container_width=True):
+            st.session_state.cancel_event.set()
+            st.session_state.cancelling = True
+            cancel_entry = AgentLogEntry(
+                agent="system",
+                message="Cancel requested. Stopping at the next safe boundary.",
+                level="warning",
+            )
+            st.session_state.all_log_entries.append(cancel_entry)
+            st.session_state.log_queue.put(cancel_entry)
+            st.rerun()
+    else:
+        run_disabled = not user_task.strip()
+        if st.button("▶ Run Agent Pipeline", disabled=run_disabled, use_container_width=True):
+            st.session_state.running = True
+            st.session_state.cancelling = False
+            st.session_state.log_queue = queue.Queue()
+            st.session_state.result_queue = queue.Queue()
+            st.session_state.cancel_event = threading.Event()
+            st.session_state.all_log_entries = []
+            st.session_state.current_session = None
+            thread = threading.Thread(
+                target=run_pipeline_thread,
+                args=(
+                    user_task.strip(),
+                    st.session_state.log_queue,
+                    st.session_state.result_queue,
+                    st.session_state.config["max_retries"],
+                    st.session_state.cancel_event,
+                ),
+                daemon=True,
+            )
+            st.session_state.worker_thread = thread
+            thread.start()
+            st.rerun()
 
     with st.expander("Config", expanded=False):
         st.session_state.config["max_retries"] = st.select_slider(
@@ -174,9 +236,23 @@ with left_col:
     if st.session_state.session_history:
         for session in reversed(st.session_state.session_history):
             marker = "●" if session.status == "completed" else "○"
-            result = "✓" if session.status == "completed" else "✗"
+            if session.status == "completed":
+                result = "✓"
+            elif session.status == "cancelled":
+                result = "!"
+            else:
+                result = "✗"
             excerpt = session.task[:52] + ("..." if len(session.task) > 52 else "")
-            st.caption(f"{marker} {session.session_id} {result} — {excerpt}")
+            if st.button(
+                f"{marker} {session.session_id} {result}",
+                key=f"history_{session.session_id}",
+                disabled=st.session_state.running,
+                use_container_width=True,
+            ):
+                st.session_state.current_session = session
+                st.session_state.all_log_entries = session.logs
+                st.rerun()
+            st.caption(excerpt)
     else:
         st.caption("No sessions yet.")
 
@@ -219,7 +295,7 @@ with main_col:
                     for attempt in attempts
                 ]
             )
-            for tab, attempt in zip(tabs, attempts):
+            for tab, attempt in zip(tabs, attempts, strict=True):
                 with tab:
                     st.code(attempt.code, language="python")
         else:
