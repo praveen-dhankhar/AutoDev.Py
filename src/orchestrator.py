@@ -16,6 +16,16 @@ from src.utils import (
 )
 
 
+NON_RETRIABLE_QA_ERROR_PREFIXES = (
+    "DockerUnavailable:",
+    "SandboxImageUnavailable:",
+)
+
+
+def is_non_retriable_qa_failure(stderr: str) -> bool:
+    return stderr.startswith(NON_RETRIABLE_QA_ERROR_PREFIXES)
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -117,6 +127,18 @@ class Orchestrator:
                 level="error",
             )
             previous_error = result.stderr
+
+            if is_non_retriable_qa_failure(result.stderr):
+                session.status = "failed"
+                self.emit(
+                    "system",
+                    (
+                        "✗ Sandbox infrastructure failure is non-retriable. "
+                        "Circuit breaker stopped the retry loop."
+                    ),
+                    level="error",
+                )
+                return session
 
             if attempt_num < self.max_retries:
                 session.status = "correcting"

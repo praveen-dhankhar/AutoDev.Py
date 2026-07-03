@@ -1,11 +1,11 @@
 import os
 
 from src.models import ExecutionResult
-from src.tools.python_executor import ExecutorInput, PythonExecutorTool
+from src.tools.python_executor import ExecutorInput, SandboxedPythonExecutor
 
 
 def run_qa(script_path: str) -> ExecutionResult:
-    executor = PythonExecutorTool()
+    executor = SandboxedPythonExecutor()
     output = executor.run(
         ExecutorInput(
             script_path=script_path,
