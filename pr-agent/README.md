@@ -48,10 +48,10 @@ PR-Agent uses a strict orchestration loop rather than an open-ended autonomous a
 ## Quick Start
 
 ```bash
-git clone <your-repo-url>
-cd pr-agent
-/usr/local/bin/python3.11 -m venv venv
-source venv/bin/activate
+git clone https://github.com/praveen-dhankhar/AutoDev.Py.git
+cd AutoDev.Py/pr-agent
+python3.11 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ollama pull qwen2.5-coder:7b
 cp .env.example .env
@@ -96,11 +96,11 @@ data = response.json()          # Fixed: using .json() method
 ## Development
 
 ```bash
-/usr/local/bin/python3.11 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-pip install pytest
-pytest tests/test_executor.py tests/test_orchestrator.py -v
+cd ..
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+pytest
 ```
 
 To verify live local LLM connectivity after creating `.env` and pulling the model:
