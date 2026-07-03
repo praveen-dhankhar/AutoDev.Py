@@ -1,10 +1,10 @@
-# PR-Agent Technical Documentation
+# AutoDev.py Technical Documentation
 
 > Version: v0.1.0  
 > Status: local-first portfolio release  
 > Stack: Python 3.11, Streamlit, CrewAI, Ollama, Docker, pytest, Ruff, GitHub Actions
 
-PR-Agent is a self-correcting Python code-generation system. A user gives it a natural language task; the system plans the work, writes a Python script, executes that script in a constrained Docker sandbox, and retries with the exact traceback when execution fails.
+AutoDev.py is a self-correcting Python code-generation system. A user gives it a natural language task; the system plans the work, writes a Python script, executes that script in a constrained Docker sandbox, and retries with the exact traceback when execution fails.
 
 The project is production-leaning because it treats generated code as untrusted, makes orchestration observable, and enforces the critical guarantees in CI.
 
@@ -204,7 +204,7 @@ Target length: 60-90 seconds.
 7. Show QA passing and `final.py` becoming available.
 8. Close on the security model: the generated script never executed on the host.
 
-The repository includes `media/pr-agent-demo.mp4` as a compact reviewer-facing demo asset for this flow.
+The repository includes `media/autodev-demo.mp4` as a compact reviewer-facing demo asset for this flow.
 
 ## Limitations
 
@@ -218,7 +218,7 @@ The repository includes `media/pr-agent-demo.mp4` as a compact reviewer-facing d
 
 Use this framing with reviewers:
 
-> PR-Agent is not just a code-generation UI. The technical point is the closed feedback loop around untrusted generated code. I made the orchestration explicit, persisted every transition, put generated scripts behind a constrained Docker boundary, and added CI tests that try to break that boundary. That is what makes it production-leaning rather than a simple agent demo.
+> AutoDev.py is not just a code-generation UI. The technical point is the closed feedback loop around untrusted generated code. I made the orchestration explicit, persisted every transition, put generated scripts behind a constrained Docker boundary, and added CI tests that try to break that boundary. That is what makes it production-leaning rather than a simple agent demo.
 
 ## File Map
 

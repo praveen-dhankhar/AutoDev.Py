@@ -16,7 +16,7 @@ from src.orchestrator import Orchestrator
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pr-agent",
-        description="Run PR-Agent from the command line.",
+        description="Run AutoDev.py from the command line.",
     )
     parser.add_argument(
         "--version",

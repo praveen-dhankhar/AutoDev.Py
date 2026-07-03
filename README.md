@@ -10,7 +10,7 @@ AutoDev.py is a local multi-agent system that plans, writes, executes, and self-
 | Sandboxed generated code | Docker executor with no network in CI, read-only rootfs, tmpfs workdir, non-root user, CPU/memory/PID caps |
 | Observable orchestration | `PLANNING -> CODING -> EXECUTING -> RETRYING -> SUCCEEDED/FAILED/CANCELLED` logged to `execution_log.jsonl` |
 | Regression protection | GitHub Actions runs Ruff, unit tests, package build, both Docker builds, and adversarial sandbox tests |
-| Reviewer demo | [60-90s self-correction demo](media/pr-agent-demo.mp4) plus the example below |
+| Reviewer demo | [60-90s self-correction demo](media/autodev-demo.mp4) plus the example below |
 
 ## Architecture
 
@@ -197,4 +197,4 @@ The dashboard reloads past sessions from `workspace/sessions/` on startup. `work
 
 ## Scope
 
-PR-Agent is production-leaning, not a hosted multi-tenant service. The meaningful production signals are the sandbox boundary, explicit state machine, cancellation cleanup, package/CLI entry point, release workflow, and CI adversarial gates. It is still intentionally local-first and depends on a local Ollama model.
+AutoDev.py is production-leaning, not a hosted multi-tenant service. The meaningful production signals are the sandbox boundary, explicit state machine, cancellation cleanup, package/CLI entry point, release workflow, and CI adversarial gates. It is still intentionally local-first and depends on a local Ollama model.
