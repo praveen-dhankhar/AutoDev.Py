@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Reworked README for reviewer-first portfolio presentation.
+- Added architecture diagrams and an explicit security section for the Docker sandbox.
+- Added a compact self-correction demo recording asset.
+- Rewrote `PR-Agent-Docs.md` to match the current v0.1.0 implementation.
+
 ## v0.1.0 - 2026-07-03
 
 - Added Python package metadata and the `pr-agent` console entry point.
