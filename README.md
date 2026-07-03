@@ -1,166 +1,183 @@
-# AutoDev.py - Automated Software Engineer
+# AutoDev.py
 
-AutoDev.py is a local multi-agent system that plans, writes, executes, and self-corrects Python scripts. It is built as a portfolio-grade agent project: generated code runs in a Docker sandbox, orchestration is an explicit state machine, and CI blocks regressions in isolation and retry behavior.
+AutoDev.py is a local, self-correcting Python coding agent. It accepts a natural
+language task, plans the implementation, writes a Python script, executes that
+script in a constrained Docker sandbox, and retries with the exact traceback when
+the generated code fails.
 
-## 30-Second Review
+The project is intentionally local-first. It uses Ollama for model inference,
+Streamlit for the UI, and Docker for generated-code isolation. The core
+engineering goal is not just code generation; it is an observable feedback loop
+around untrusted generated code.
 
-| What matters | Where it shows up |
+## Highlights
+
+| Area | Implementation |
 |---|---|
-| Real execution feedback loop | Architect -> Coder -> QA -> traceback retry -> final script |
-| Sandboxed generated code | Docker executor with no network in CI, read-only rootfs, tmpfs workdir, non-root user, CPU/memory/PID caps |
-| Observable orchestration | `PLANNING -> CODING -> EXECUTING -> RETRYING -> SUCCEEDED/FAILED/CANCELLED` logged to `execution_log.jsonl` |
-| Regression protection | GitHub Actions runs Ruff, unit tests, package build, both Docker builds, and adversarial sandbox tests |
-| Reviewer demo | [60-90s self-correction demo](media/autodev-demo.mp4) plus the example below |
+| User interfaces | Streamlit dashboard and `pr-agent` CLI |
+| Agent flow | Architect -> Coder -> QA |
+| Model backend | Local Ollama model via `langchain-ollama` |
+| Execution | Docker-backed `SandboxedPythonExecutor`; no host fallback |
+| Orchestration | Explicit state machine with JSONL transition logs |
+| Failure handling | Bounded retries, repeated-traceback circuit breaker, fail-closed sandbox checks |
+| CI coverage | Ruff, unit tests, package build, Docker builds, adversarial sandbox tests |
+| Demo asset | `media/autodev-demo.mp4` |
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    U[User] --> UI[Streamlit UI<br/>or pr-agent CLI]
-    UI --> O[Orchestrator<br/>explicit state machine]
+    U[User] --> UI[Streamlit UI or pr-agent CLI]
+    UI --> O[Orchestrator]
 
-    O --> A[Architect Agent<br/>creates plan]
+    O --> A[Architect Agent]
     A --> O
 
-    O --> C[Coder Agent<br/>writes script]
+    O --> C[Coder Agent]
     C --> O
 
-    O --> Q[QA Agent<br/>runs script]
+    O --> Q[QA Agent]
     Q --> E[SandboxedPythonExecutor]
-    E --> D[(Docker sandbox<br/>autodev-py-sandbox)]
-    D --> R{Execution result}
+    E --> D[(Docker sandbox)]
+    D --> E
+    E --> Q
+    Q --> O
 
-    R -->|pass| F[final.py]
-    R -->|fail + traceback| O
-    O -->|bounded retry| C
-    O -->|cancel| X[CANCELLED<br/>container cleanup]
+    O -->|traceback retry| C
+    O -->|pass| F[final.py]
+    O -->|cancel| X[CANCELLED]
 ```
 
-The orchestrator owns all state transitions. Agents do not call each other directly; each step returns data to the orchestrator, which decides the next state, persists artifacts, and writes structured transition logs.
+The orchestrator owns every state transition. Agents return outputs to the
+orchestrator; they do not call each other directly. This keeps retries,
+failures, cancellation, and session persistence inspectable.
 
-```mermaid
-stateDiagram-v2
-    [*] --> IDLE
-    IDLE --> PLANNING: task submitted
-    PLANNING --> CODING: plan ready
-    PLANNING --> FAILED: architect error
-    CODING --> EXECUTING: script saved
-    CODING --> FAILED: coder error
-    EXECUTING --> SUCCEEDED: exit 0
-    EXECUTING --> RETRYING: failing stderr + retries remain
-    RETRYING --> CODING: send traceback to coder
-    EXECUTING --> FAILED: retry budget exhausted
-    EXECUTING --> FAILED: repeated traceback circuit breaker
-    EXECUTING --> CANCELLED: user stop signal
-```
-
-## Self-Correction Example
-
-The demo flow intentionally shows a realistic generated-code failure and recovery.
-
-Attempt 1:
-
-```python
-response = requests.get(url)
-data = json.loads(response)     # Bug: Response is not a JSON string
-```
-
-QA result:
+Runtime states:
 
 ```text
-TypeError: the JSON object must be str, bytes or bytearray, not Response
+IDLE -> PLANNING -> CODING -> EXECUTING -> SUCCEEDED
+                         |         |
+                         |         -> RETRYING -> CODING
+                         |         -> FAILED
+                         |         -> CANCELLED
+                         -> FAILED
 ```
 
-Attempt 2:
+Each session writes artifacts under `workspace/sessions/{session_id}/`:
 
-```python
-response = requests.get(url)
-data = response.json()
-```
-
-The exact traceback is sent back into the Coder prompt. If the same traceback repeats twice, the circuit breaker stops early instead of wasting all retry attempts.
-
-## Security Model
-
-Loop 1 moved generated-code execution out of the host process and into a Docker-backed sandbox. The QA path uses `SandboxedPythonExecutor` only; if Docker or the sandbox image is unavailable, execution fails closed and never falls back to host subprocess execution.
-
-Sandbox controls:
-
-- `--network=none` by default; CI forces network off even if local opt-in is set.
-- `--read-only` root filesystem.
-- No writable host bind mount; generated code receives stdin and writes only to ephemeral container tmpfs.
-- Tmpfs workspace and `/tmp` capped at 16 MB.
-- Non-root `sandbox` user (`1000:1000`).
-- `--cap-drop=ALL` and `--security-opt=no-new-privileges`.
-- `--cpus=1`, `--memory=128m`, `--memory-swap=128m`, `--pids-limit=64`.
-- Executor timeout removes the running container; UI cancellation also removes the active container before returning `CANCELLED`.
-
-Adversarial verification runs through the real executor path and covers:
-
-- outbound network call
-- fork/process storm
-- disk fill
-- infinite loop
-- `/etc/passwd` read scope
-- memory exhaustion
-- mid-execution cancellation cleanup
-
-Each test also asserts there are no sandbox container leaks and no host marker files were written.
-
-## CI and Release Gates
-
-`.github/workflows/ci.yml` is intentionally stricter than basic `pytest`:
-
-1. `ruff check .`
-2. `pytest -m "not docker"`
-3. `pr-agent --version`
-4. `python -m build`
-5. build the app Docker image
-6. build the sandbox Docker image
-7. `pytest -m docker` adversarial sandbox suite
-
-Tag pushes (`v*`) also build and push release images to GHCR:
-
-- `ghcr.io/praveen-dhankhar/autodev-py-app:v0.1.0`
-- `ghcr.io/praveen-dhankhar/autodev-py-sandbox:v0.1.0`
-
-Nightly/manual CI runs the live Ollama smoke test separately because it is slower and depends on pulling a local model.
+| Artifact | Purpose |
+|---|---|
+| `task.txt` | Original user task |
+| `plan.md` | Architect plan |
+| `attempt_1.py`, `attempt_2.py`, ... | Generated code attempts |
+| `final.py` | Passing script, written only after successful execution |
+| `execution_log.jsonl` | Timestamped agent logs and state transitions |
 
 ## Quick Start
+
+Prerequisites:
+
+- Python 3.11+
+- Docker daemon running locally
+- Ollama running at `http://localhost:11434`
+- `qwen2.5-coder:7b` pulled locally, or `OLLAMA_MODEL` set to another available model
 
 ```bash
 git clone https://github.com/praveen-dhankhar/AutoDev.Py.git
 cd AutoDev.Py
+
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e .
+
 docker build -f sandbox.Dockerfile -t autodev-py-sandbox:latest .
 ollama pull qwen2.5-coder:7b
 cp .env.example .env
+```
+
+Start the dashboard:
+
+```bash
 pr-agent ui
 ```
 
-The app opens at `http://localhost:8501`. Docker must be running so generated scripts execute inside the sandbox, and Ollama must be running at `http://localhost:11434`.
+The app opens at `http://localhost:8501`.
 
-CLI mode:
+Run from the CLI:
 
 ```bash
 pr-agent run "Write a Python script that prints the Fibonacci sequence up to 10"
 ```
 
-`pr-agent run` performs an Ollama health check before starting the agent loop and exits early if the local model server is unavailable.
+The CLI checks Ollama before starting a live run and exits early if the local
+model server is unavailable.
+
+## Configuration
+
+Configuration is loaded from environment variables and `.env`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `OLLAMA_MODEL` | `qwen2.5-coder:7b` | Local Ollama model |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
+| `MAX_RETRIES` | `3` | Maximum self-correction attempts |
+| `SUBPROCESS_TIMEOUT` | `30` | Sandbox execution timeout in seconds |
+| `AGENT_CALL_TIMEOUT` | `60` | Local LLM call timeout in seconds |
+| `WORKSPACE_DIR` | `./workspace` | Session artifact root |
+| `SANDBOX_IMAGE` | `autodev-py-sandbox:latest` | Docker image used for generated code |
+| `SANDBOX_ALLOW_NETWORK` | `0` | Local sandbox network opt-in; ignored in CI |
+
+## Sandbox Model
+
+Generated Python is treated as untrusted. The QA path executes generated code
+only through Docker. If Docker or the configured sandbox image is unavailable,
+the run fails closed instead of falling back to host execution.
+
+Sandbox controls:
+
+```text
+--network=none
+--cpus=1
+--memory=128m
+--memory-swap=128m
+--pids-limit=64
+--read-only
+--cap-drop=ALL
+--security-opt=no-new-privileges
+--user=1000:1000
+--tmpfs /workspace:rw,noexec,nosuid,nodev,size=16m,mode=1777
+--tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+```
+
+Important behavior:
+
+- Generated code is passed to the container through stdin.
+- No writable host directory is mounted into the sandbox.
+- CI forces sandbox networking off even if local network opt-in is configured.
+- Timeout and cancellation paths remove the named sandbox container.
+
+The adversarial Docker test suite covers outbound network access, process storms,
+disk fill attempts, infinite loops, container-scoped file reads, memory pressure,
+and mid-execution cancellation cleanup.
 
 ## Development
+
+Install development dependencies:
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+```
+
+Run the standard local checks:
+
+```bash
 ruff check .
 pytest
 ```
 
-Docker-marked tests require Docker and a built sandbox image:
+Run Docker-marked sandbox tests:
 
 ```bash
 docker build -f sandbox.Dockerfile -t autodev-py-sandbox:local-test .
@@ -170,31 +187,73 @@ SANDBOX_ALLOW_NETWORK=0 \
 pytest -m docker
 ```
 
-## Environment Variables
+## CI and Release
 
-| Variable | Default | Description |
-|---|---|---|
-| `OLLAMA_MODEL` | `qwen2.5-coder:7b` | Local Ollama model |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
-| `MAX_RETRIES` | `3` | Max self-correction attempts |
-| `SUBPROCESS_TIMEOUT` | `30` | Sandbox execution timeout in seconds |
-| `AGENT_CALL_TIMEOUT` | `60` | Local LLM call timeout in seconds |
-| `WORKSPACE_DIR` | `./workspace` | Session artifact root |
-| `SANDBOX_IMAGE` | `autodev-py-sandbox:latest` | Docker image used for generated code |
-| `SANDBOX_ALLOW_NETWORK` | `0` | Local-only network opt-in; ignored in CI |
+The GitHub Actions workflow runs the deterministic quality gates on pull
+requests and pushes:
 
-## Runtime Artifacts
+1. `ruff check .`
+2. `pytest -m "not docker"`
+3. `pr-agent --version`
+4. `python -m build`
+5. Build the app Docker image
+6. Build the sandbox Docker image
+7. `pytest -m docker`
 
-Each run writes local artifacts under `workspace/sessions/{session_id}/`:
+Tag pushes also build and push the app and sandbox images to GHCR. A scheduled
+and manually triggered workflow installs Ollama, pulls `qwen2.5-coder:7b`, and
+runs the live Ollama smoke test separately from PR checks.
 
-- `task.txt` - original task
-- `plan.md` - Architect plan
-- `attempt_1.py`, `attempt_2.py`, ... - generated scripts
-- `final.py` - only written after a passing execution
-- `execution_log.jsonl` - timestamped agent messages and state transitions
+## Performance Benchmarks
 
-The dashboard reloads past sessions from `workspace/sessions/` on startup. `workspace/` is ignored because it contains generated run output.
+Latest local k6 run against the warmed Streamlit HTTP surface:
 
-## Scope
+- Target: `http://localhost:8501`
+- Load shape: `10 VUs`, `30s`, `300 iterations`, `600 HTTP requests`
+- Result: `0` failed requests, `100%` checks passed, `19.77 req/s`
+- Evidence: `loadtests/results/k6_streamlit_20260704-001000.txt`
 
-AutoDev.py is production-leaning, not a hosted multi-tenant service. The meaningful production signals are the sandbox boundary, explicit state machine, cancellation cleanup, package/CLI entry point, release workflow, and CI adversarial gates. It is still intentionally local-first and depends on a local Ollama model.
+| Endpoint | p95 | p99 | Average | Max |
+|---|---:|---:|---:|---:|
+| Overall | 9.81 ms | 19.61 ms | 5.12 ms | 20.22 ms |
+| `/_stcore/health` | 4.35 ms | 5.31 ms | 2.51 ms | 5.72 ms |
+| `/` | 10.69 ms | 19.79 ms | 7.73 ms | 20.22 ms |
+
+Reproduce the HTTP latency test:
+
+```bash
+TARGET_URL=http://localhost:8501 \
+VUS=10 \
+DURATION=30s \
+k6 run loadtests/k6_streamlit_latency.js
+```
+
+These numbers measure warmed local Streamlit HTTP latency only. They do not
+measure full LLM generation, Docker sandbox execution, or end-to-end agent
+pipeline latency.
+
+## Project Layout
+
+| Path | Purpose |
+|---|---|
+| `app.py` | Streamlit dashboard, run controls, session display |
+| `src/cli.py` | `pr-agent` command-line entry point |
+| `src/orchestrator.py` | State machine, retries, cancellation, circuit breakers |
+| `src/agents/` | Architect, Coder, and QA agent wrappers |
+| `src/tools/python_executor.py` | Docker-backed sandbox executor |
+| `src/session_store.py` | Workspace session reload |
+| `src/health.py` | Ollama health check |
+| `tests/` | Unit, orchestration, CLI, health, executor, and sandbox tests |
+| `loadtests/` | k6 HTTP latency script and captured benchmark output |
+| `Dockerfile` | Streamlit app image |
+| `sandbox.Dockerfile` | Minimal Python runtime for generated code |
+
+## Limitations
+
+- The app is local-first and single-user.
+- Live agent execution depends on a local Ollama model.
+- Generated scripts run in a Python sandbox image; installing arbitrary third-party
+  dependencies inside generated code is intentionally out of scope.
+- The Docker sandbox is local process isolation, not a remote multi-tenant
+  execution platform.
+- Session storage is filesystem-backed under `workspace/`, not database-backed.
