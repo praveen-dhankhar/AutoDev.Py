@@ -35,9 +35,11 @@ defaults = {
     "config": {"model": OLLAMA_MODEL, "max_retries": 3, "timeout": 30},
     "all_log_entries": [],
     "task_input": "",
+    "pending_task_input": None,
     "ollama_health": None,
     "last_ollama_health_check": 0.0,
 }
+
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -119,14 +121,17 @@ while not st.session_state.result_queue.empty():
         break
 
 col_title, col_status, col_session = st.columns([3, 2, 1])
+
 with col_title:
     st.title("PR-Agent ⚙️")
+
 with col_status:
     status = (
         st.session_state.current_session.status
         if st.session_state.current_session
         else "idle"
     )
+
     if st.session_state.cancelling:
         status = "cancelled"
     elif st.session_state.running and st.session_state.all_log_entries:
@@ -137,13 +142,16 @@ with col_status:
             status = "coding"
         elif last_agent == "qa":
             status = "executing"
+
     st.markdown(
         f'<span class="status-badge status-{status}">● {status.upper()}</span>',
         unsafe_allow_html=True,
     )
+
 with col_session:
     session_count = len(st.session_state.session_history)
     st.caption(f"Session #{session_count + 1}")
+
 st.divider()
 
 left_col, main_col = st.columns([1, 2.5])
@@ -156,6 +164,7 @@ examples = [
 
 with left_col:
     health = st.session_state.ollama_health
+
     if health and health.healthy:
         st.success("Ollama online")
     else:
@@ -163,7 +172,16 @@ with left_col:
         if health:
             st.caption(health.message)
 
+    # Important:
+    # Streamlit does not allow modifying st.session_state.task_input
+    # after the widget with key="task_input" has been instantiated.
+    # So we apply pending example text before creating the text_area.
+    if st.session_state.pending_task_input is not None:
+        st.session_state.task_input = st.session_state.pending_task_input
+        st.session_state.pending_task_input = None
+
     st.subheader("What should I build?")
+
     user_task = st.text_area(
         "Task",
         key="task_input",
@@ -174,6 +192,7 @@ with left_col:
     )
 
     st.caption("Examples")
+
     for idx, example in enumerate(examples):
         if st.button(
             example,
@@ -181,25 +200,29 @@ with left_col:
             disabled=st.session_state.running,
             use_container_width=True,
         ):
-            st.session_state.task_input = example
+            st.session_state.pending_task_input = example
             st.rerun()
 
     if st.session_state.running:
         cancel_disabled = st.session_state.cancelling
         cancel_label = "Cancel requested" if st.session_state.cancelling else "■ Stop Run"
+
         if st.button(cancel_label, disabled=cancel_disabled, use_container_width=True):
             st.session_state.cancel_event.set()
             st.session_state.cancelling = True
+
             cancel_entry = AgentLogEntry(
                 agent="system",
                 message="Cancel requested. Stopping at the next safe boundary.",
                 level="warning",
             )
+
             st.session_state.all_log_entries.append(cancel_entry)
             st.session_state.log_queue.put(cancel_entry)
             st.rerun()
     else:
         run_disabled = not user_task.strip()
+
         if st.button("▶ Run Agent Pipeline", disabled=run_disabled, use_container_width=True):
             st.session_state.running = True
             st.session_state.cancelling = False
@@ -208,6 +231,7 @@ with left_col:
             st.session_state.cancel_event = threading.Event()
             st.session_state.all_log_entries = []
             st.session_state.current_session = None
+
             thread = threading.Thread(
                 target=run_pipeline_thread,
                 args=(
@@ -219,6 +243,7 @@ with left_col:
                 ),
                 daemon=True,
             )
+
             st.session_state.worker_thread = thread
             thread.start()
             st.rerun()
@@ -233,16 +258,20 @@ with left_col:
         st.caption(f"Model: {st.session_state.config['model']} via Ollama")
 
     st.subheader("Session History")
+
     if st.session_state.session_history:
         for session in reversed(st.session_state.session_history):
             marker = "●" if session.status == "completed" else "○"
+
             if session.status == "completed":
                 result = "✓"
             elif session.status == "cancelled":
                 result = "!"
             else:
                 result = "✗"
+
             excerpt = session.task[:52] + ("..." if len(session.task) > 52 else "")
+
             if st.button(
                 f"{marker} {session.session_id} {result}",
                 key=f"history_{session.session_id}",
@@ -252,6 +281,7 @@ with left_col:
                 st.session_state.current_session = session
                 st.session_state.all_log_entries = session.logs
                 st.rerun()
+
             st.caption(excerpt)
     else:
         st.caption("No sessions yet.")
@@ -277,17 +307,23 @@ with main_col:
     with st.container(height=420):
         if not st.session_state.all_log_entries:
             st.caption("Agent logs will appear here when a run starts.")
+
         for entry in st.session_state.all_log_entries:
             avatar, display_name = AGENT_DISPLAY.get(entry.agent, ("⚙️", "System"))
+
             if entry.level == "error":
                 avatar, display_name = "🔴", "QA Engineer"
+
             with st.chat_message(display_name, avatar=avatar):
                 st.markdown(entry.message)
 
     session = st.session_state.current_session
+
     if session and session.attempts:
         st.header("💻 Generated Code")
+
         attempts = session.attempts
+
         if len(attempts) > 1:
             tabs = st.tabs(
                 [
@@ -295,6 +331,7 @@ with main_col:
                     for attempt in attempts
                 ]
             )
+
             for tab, attempt in zip(tabs, attempts, strict=True):
                 with tab:
                     st.code(attempt.code, language="python")
@@ -310,9 +347,12 @@ with main_col:
             )
 
         latest_attempt = session.latest_attempt
+
         if latest_attempt and latest_attempt.execution_result:
             result = latest_attempt.execution_result
+
             st.header("Execution Output")
+
             metric_status, metric_exit, metric_time = st.columns(3)
             metric_status.metric("Status", result.status.upper())
             metric_exit.metric("Exit Code", result.exit_code)
@@ -336,5 +376,6 @@ if st.session_state.running:
             st.session_state.all_log_entries.append(entry)
         except queue.Empty:
             break
+
     time.sleep(0.3)
     st.rerun()

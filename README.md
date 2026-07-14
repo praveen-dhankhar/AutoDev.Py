@@ -16,7 +16,7 @@ around untrusted generated code.
 |---|---|
 | User interfaces | Streamlit dashboard and `pr-agent` CLI |
 | Agent flow | Architect -> Coder -> QA |
-| Model backend | Local Ollama model via `langchain-ollama` |
+| Model backend | Local Ollama model via CrewAI's native `LLM` class |
 | Execution | Docker-backed `SandboxedPythonExecutor`; no host fallback |
 | Orchestration | Explicit state machine with JSONL transition logs |
 | Failure handling | Bounded retries, repeated-traceback circuit breaker, fail-closed sandbox checks |

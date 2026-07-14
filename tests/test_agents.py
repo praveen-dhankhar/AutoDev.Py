@@ -10,10 +10,7 @@ import pytest
 
 
 def live_agent_dependencies_available() -> bool:
-    return (
-        importlib.util.find_spec("crewai") is not None
-        and importlib.util.find_spec("langchain_ollama") is not None
-    )
+    return importlib.util.find_spec("crewai") is not None
 
 
 @pytest.mark.skipif(

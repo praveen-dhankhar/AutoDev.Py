@@ -3,17 +3,17 @@ from src.config import AGENT_CALL_TIMEOUT, OLLAMA_BASE_URL, AgentConfig
 
 def build_llm(config: AgentConfig):
     try:
-        from langchain_ollama import ChatOllama
+        from crewai import LLM
     except ImportError as exc:
         raise RuntimeError(
-            "langchain-ollama is required for local open-source LLMs. "
+            "crewai is required for local open-source LLMs. "
             "Install dependencies with: pip install -r requirements.txt"
         ) from exc
 
-    return ChatOllama(
-        model=config.llm_model,
+    return LLM(
+        model=f"ollama/{config.llm_model}",
         temperature=config.temperature,
-        num_predict=config.max_tokens,
+        max_tokens=config.max_tokens,
         base_url=OLLAMA_BASE_URL,
-        client_kwargs={"timeout": AGENT_CALL_TIMEOUT},
+        timeout=AGENT_CALL_TIMEOUT,
     )
