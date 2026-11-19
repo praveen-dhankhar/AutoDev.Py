@@ -97,14 +97,19 @@ jobs:
           docker push "$IMAGE:latest"
 
   nightly-live-ollama:
-    name: Nightly live Ollama smoke
+    name: Nightly live Ollama smoke and benchmark
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 150
     env:
       OLLAMA_MODEL: qwen2.5-coder:7b
       OLLAMA_BASE_URL: http://localhost:11434
       OLLAMA_LIVE_TESTS: "1"
+      AGENT_CALL_TIMEOUT: "180"
+      SANDBOX_IMAGE: autodev-py-sandbox:ci
+      SANDBOX_ALLOW_NETWORK: "0"
+      # CPU runners are slow; the full 50-task suite is meant for local runs.
+      EVAL_LIMIT: "20"
 
     steps:
       - name: Check out repository
@@ -141,3 +146,17 @@ jobs:
 
       - name: Run live Ollama smoke test
         run: pytest tests/test_agents.py -q
+
+      - name: Build sandbox image
+        run: docker build -f sandbox.Dockerfile -t "$SANDBOX_IMAGE" .
+
+      - name: Run self-correction benchmark
+        run: python -m evals.run --limit "$EVAL_LIMIT" --out evals/results/nightly.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: evals/results/nightly.json
+          if-no-files-found: ignore

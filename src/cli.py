@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Sequence
 
 from src import __version__
-from src.config import MAX_RETRIES, OLLAMA_BASE_URL, WORKSPACE_DIR
-from src.health import check_ollama_health
+from src.config import LLM_MODEL, MAX_RETRIES, OLLAMA_BASE_URL, OLLAMA_MODEL, WORKSPACE_DIR
+from src.health import check_ollama_health, model_supports_tools
 from src.orchestrator import Orchestrator
 
 
@@ -52,7 +52,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the Ollama preflight check.",
     )
+    run_parser.add_argument(
+        "--tools",
+        action="store_true",
+        help="Let the model call run_code/read_attempt/search_past_fixes itself.",
+    )
     run_parser.set_defaults(func=run_command)
+
+    serve_parser = subparsers.add_parser(
+        "serve",
+        help="Start the FastAPI job server.",
+    )
+    serve_parser.add_argument("--host", default="127.0.0.1", help="Bind address.")
+    serve_parser.add_argument("--port", type=int, default=8000, help="Bind port.")
+    serve_parser.set_defaults(func=serve_command)
 
     ui_parser = subparsers.add_parser(
         "ui",
@@ -75,10 +88,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_command(args: argparse.Namespace) -> int:
-    if not args.skip_health_check:
+    if args.tools and LLM_MODEL:
+        print("Tool mode uses Ollama tool calling; unset LLM_MODEL.", file=sys.stderr)
+        return 2
+
+    if not args.skip_health_check and not LLM_MODEL:
         health = check_ollama_health(OLLAMA_BASE_URL)
         if not health.healthy:
             print(health.message, file=sys.stderr)
+            return 2
+        if args.tools and not model_supports_tools(OLLAMA_MODEL, OLLAMA_BASE_URL):
+            print(
+                f"Ollama model {OLLAMA_MODEL!r} does not report tool-calling support.",
+                file=sys.stderr,
+            )
             return 2
 
     log_queue: queue.Queue = queue.Queue()
@@ -86,6 +109,7 @@ def run_command(args: argparse.Namespace) -> int:
         log_queue=log_queue,
         max_retries=args.max_retries,
         workspace_dir=args.workspace_dir,
+        mode="tools" if args.tools else "classic",
     )
     session = orchestrator.run(args.task)
 
@@ -119,6 +143,13 @@ def ui_command(args: argparse.Namespace) -> int:
         str(args.server_port),
     ]
     return subprocess.call(command)
+
+
+def serve_command(args: argparse.Namespace) -> int:
+    import uvicorn
+
+    uvicorn.run("src.api:app", host=args.host, port=args.port)
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:

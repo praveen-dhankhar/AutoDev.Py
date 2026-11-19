@@ -5,8 +5,9 @@ language task, plans the implementation, writes a Python script, executes that
 script in a constrained Docker sandbox, and retries with the exact traceback when
 the generated code fails.
 
-The project is intentionally local-first. It uses Ollama for model inference,
-Streamlit for the UI, and Docker for generated-code isolation. The core
+The project is local-first. It uses Ollama for model inference (with an optional
+hosted OpenAI or Gemini model), Streamlit and FastAPI as front ends, and Docker
+for generated-code isolation. The core
 engineering goal is not just code generation; it is an observable feedback loop
 around untrusted generated code.
 
@@ -14,13 +15,16 @@ around untrusted generated code.
 
 | Area | Implementation |
 |---|---|
-| User interfaces | Streamlit dashboard and `pr-agent` CLI |
-| Agent flow | Architect -> Coder -> QA |
-| Model backend | Local Ollama model via CrewAI's native `LLM` class |
+| User interfaces | Streamlit dashboard, `pr-agent` CLI, FastAPI job API with SSE streaming |
+| Agent flow | Architect -> Coder -> QA, or a tool-calling mode where the model drives |
+| Model backend | Local Ollama via CrewAI's `LLM` class; hosted OpenAI/Gemini via `LLM_MODEL` |
+| Tool use | `run_code`, `read_attempt`, `search_past_fixes` bound with LangChain `bind_tools` |
+| Memory | Traceback-and-fix pairs embedded and retrieved into the Coder prompt across sessions |
+| Evaluation | 50-task MBPP-style benchmark measuring traceback-feedback lift |
 | Execution | Docker-backed `SandboxedPythonExecutor`; no host fallback |
 | Orchestration | Explicit state machine with JSONL transition logs |
 | Failure handling | Bounded retries, repeated-traceback circuit breaker, fail-closed sandbox checks |
-| CI coverage | Ruff, unit tests, package build, Docker builds, adversarial sandbox tests |
+| CI coverage | Ruff, unit tests, package build, Docker builds, adversarial sandbox tests, nightly benchmark |
 | Demo asset | `media/autodev-demo.mp4` |
 
 ## Architecture
@@ -92,6 +96,7 @@ pip install -e .
 
 docker build -f sandbox.Dockerfile -t autodev-py-sandbox:latest .
 ollama pull qwen2.5-coder:7b
+ollama pull nomic-embed-text   # optional: enables long-term fix memory
 cp .env.example .env
 ```
 
@@ -112,6 +117,103 @@ pr-agent run "Write a Python script that prints the Fibonacci sequence up to 10"
 The CLI checks Ollama before starting a live run and exits early if the local
 model server is unavailable.
 
+## Tool-Calling Mode
+
+```bash
+pr-agent run --tools "Write a function that returns the nth prime and test it"
+```
+
+By default the orchestrator decides when to execute code. With `--tools`, the
+model decides instead. `src/agents/tool_agent.py` binds three tools with
+LangChain's `ChatOllama.bind_tools` and loops until the model stops calling
+tools or a run passes:
+
+| Tool | What it does |
+|---|---|
+| `run_code(code)` | Saves the next `attempt_N.py`, runs it in the Docker sandbox, returns PASS or FAIL with the traceback |
+| `read_attempt(n)` | Returns the code and result of an earlier attempt |
+| `search_past_fixes(error)` | Queries long-term memory for similar tracebacks |
+
+The tools still go through the orchestrator, so the state log looks the same as
+in the default mode (`CODING -> EXECUTING -> RETRYING -> ...`), and the retry
+budget, cancellation, and non-retriable sandbox checks still apply. The CLI
+first asks Ollama's `/api/show` whether the model reports the `tools`
+capability, and refuses to start if it doesn't.
+
+## Long-Term Fix Memory
+
+When a failed attempt is followed by a passing one, the orchestrator embeds
+the traceback with `nomic-embed-text` (via Ollama's `/api/embed`). It stores
+the traceback with the fixed code in `workspace/memory/fixes.jsonl`. On a later
+failure, in any session, the most similar past fixes (cosine similarity ≥ 0.6,
+top 2) are added to the Coder's retry prompt. In tool mode, the model can query
+them through `search_past_fixes`.
+
+If the embedding model is unavailable, the run carries on without memory.
+
+## HTTP API
+
+```bash
+pr-agent serve --port 8000
+```
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /jobs` | Start a job: `{"task": "...", "max_retries": 3, "mode": "classic" \| "tools"}` |
+| `GET /jobs/{id}` | Status, attempt count, final code |
+| `GET /jobs/{id}/events` | Server-Sent Events: replays every state change and log entry so far, then follows live |
+| `POST /jobs/{id}/cancel` | Cancel a running job |
+
+```bash
+curl -s -X POST localhost:8000/jobs -H 'Content-Type: application/json' \
+  -d '{"task": "print the first 10 primes"}'
+curl -N localhost:8000/jobs/<job_id>/events
+```
+
+The server binds to `127.0.0.1` by default. Set `API_TOKEN` to require
+`Authorization: Bearer <token>`. `MAX_CONCURRENT_JOBS` caps how many jobs run at
+once; extra requests get HTTP 429.
+
+## Hosted Models
+
+Set `LLM_MODEL` to run the Architect and Coder on a hosted model instead of
+Ollama. This makes the API cheap to deploy without a GPU.
+
+```bash
+LLM_MODEL=openai/gpt-4o-mini OPENAI_API_KEY=... pr-agent run "..."
+LLM_MODEL=gemini/gemini-2.0-flash GEMINI_API_KEY=... pr-agent run "..."  # pip install "crewai[google-genai]"
+```
+
+Tool mode and fix memory still need Ollama.
+
+## Benchmark
+
+`evals/` runs the self-correction loop on 50 MBPP-style tasks. Each task comes
+with assert-based tests, which are shown to the agent and appended to every
+executed script, so a run passes only if the assertions pass. Each task also
+has a reference solution, and a unit test checks that every task's assertions
+pass against it.
+
+```bash
+python -m evals.run                                   # all tasks: feedback vs no-feedback
+python -m evals.run --limit 20 --conditions feedback,no-feedback,memory
+python -m evals.run --mode tools                      # benchmark tool-calling mode
+OLLAMA_MODEL=llama3.1:8b python -m evals.run          # compare models
+```
+
+| Condition | Retries see |
+|---|---|
+| `feedback` | The previous traceback (normal behaviour) |
+| `no-feedback` | Only the task, so each retry is a fresh sample (ablation baseline) |
+| `memory` | Traceback plus retrieved past fixes, starting from an empty store |
+
+It reports the first-try pass rate, the pass rate after retries, average
+retries per task, and the **traceback feedback lift** (the pass rate after
+retries with feedback minus the same rate without it). The Architect is skipped
+so the numbers isolate the Coder -> sandbox -> retry loop. Results are written
+to `evals/results/*.json`. The nightly workflow runs the first 20 tasks and
+uploads the JSON as an artifact.
+
 ## Configuration
 
 Configuration is loaded from environment variables and `.env`.
@@ -126,6 +228,10 @@ Configuration is loaded from environment variables and `.env`.
 | `WORKSPACE_DIR` | `./workspace` | Session artifact root |
 | `SANDBOX_IMAGE` | `autodev-py-sandbox:latest` | Docker image used for generated code |
 | `SANDBOX_ALLOW_NETWORK` | `0` | Local sandbox network opt-in; ignored in CI |
+| `LLM_MODEL` | empty | Hosted model, e.g. `openai/gpt-4o-mini`; empty means Ollama |
+| `EMBED_MODEL` | `nomic-embed-text` | Ollama embedding model for fix memory |
+| `API_TOKEN` | empty | Bearer token for the HTTP API; empty disables auth |
+| `MAX_CONCURRENT_JOBS` | `2` | Concurrent HTTP API jobs |
 
 ## Sandbox Model
 
@@ -201,8 +307,9 @@ requests and pushes:
 7. `pytest -m docker`
 
 Tag pushes also build and push the app and sandbox images to GHCR. A scheduled
-and manually triggered workflow installs Ollama, pulls `qwen2.5-coder:7b`, and
-runs the live Ollama smoke test separately from PR checks.
+and manually triggered workflow installs Ollama, pulls `qwen2.5-coder:7b`, runs
+the live Ollama smoke test, then runs the benchmark on 20 tasks. Results go to
+the job summary and an `eval-results` artifact.
 
 ## Performance Benchmarks
 
@@ -238,8 +345,11 @@ pipeline latency.
 |---|---|
 | `app.py` | Streamlit dashboard, run controls, session display |
 | `src/cli.py` | `pr-agent` command-line entry point |
-| `src/orchestrator.py` | State machine, retries, cancellation, circuit breakers |
-| `src/agents/` | Architect, Coder, and QA agent wrappers |
+| `src/orchestrator.py` | State machine, retries, cancellation, circuit breakers, tool mode |
+| `src/agents/` | Architect, Coder, QA wrappers and the LangChain tool-calling loop |
+| `src/memory.py` | Embedded traceback-and-fix store |
+| `src/api.py` | FastAPI job service with SSE |
+| `evals/` | MBPP-style tasks and benchmark runner |
 | `src/tools/python_executor.py` | Docker-backed sandbox executor |
 | `src/session_store.py` | Workspace session reload |
 | `src/health.py` | Ollama health check |
@@ -257,3 +367,7 @@ pipeline latency.
 - The Docker sandbox is local process isolation, not a remote multi-tenant
   execution platform.
 - Session storage is filesystem-backed under `workspace/`, not database-backed.
+- API jobs are held in memory and lost on restart.
+- Fix memory is a linear scan over a JSONL file, which is fine for thousands of
+  fixes. A vector store would be needed beyond that.
+- Tool mode and fix memory depend on Ollama even when `LLM_MODEL` is set.

@@ -354,3 +354,23 @@ def test_orchestrator_fails_when_coder_raises(tmp_path):
         ("PLANNING", "CODING"),
         ("CODING", "FAILED"),
     ]
+
+
+def test_no_feedback_mode_retries_without_traceback(tmp_path):
+    results = [
+        execution_result(status="fail", stderr="NameError: x", exit_code=1),
+        execution_result(status="pass"),
+    ]
+    with patch("src.orchestrator.run_architect") as architect_mock:
+        with patch("src.orchestrator.run_coder", return_value="print(1)") as coder_mock:
+            with patch("src.orchestrator.run_qa", side_effect=results):
+                session = Orchestrator(
+                    log_queue=queue.Queue(),
+                    workspace_dir=str(tmp_path),
+                    feedback=False,
+                    use_memory=False,
+                ).run(task="t", plan="given plan")
+
+    architect_mock.assert_not_called()
+    assert session.status == "completed"
+    assert [c.kwargs["error"] for c in coder_mock.call_args_list] == [None, None]

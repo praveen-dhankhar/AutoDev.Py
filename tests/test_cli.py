@@ -49,6 +49,7 @@ def test_cli_run_invokes_orchestrator_and_reports_success(tmp_path, capsys):
         log_queue=log_queue,
         max_retries=2,
         workspace_dir=str(tmp_path),
+        mode="classic",
     )
     orchestrator.run.assert_called_once_with("print hello")
     output = capsys.readouterr().out

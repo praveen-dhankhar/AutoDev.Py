@@ -17,6 +17,10 @@ AGENT_CALL_TIMEOUT = int(os.getenv("AGENT_CALL_TIMEOUT", 60))
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 WORKSPACE_DIR = os.getenv("WORKSPACE_DIR", "./workspace")
+# Hosted model override in provider/model form, e.g. "openai/gpt-4o-mini" or
+# "gemini/gemini-2.0-flash". Empty means use the local Ollama model.
+LLM_MODEL = os.getenv("LLM_MODEL", "")
+EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
 
 
 @dataclass
